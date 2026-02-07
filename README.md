@@ -199,25 +199,3 @@ XDP-based load balancing delivers performance improvements measured in orders of
 The primary scaling constraint in this architecture is the cost of eBPF map operations for connection tracking. Hash map lookups and insertions in the conntrack table represent the most computationally intensive operations in the pipeline. For workloads characterized by very high connection-establishment rates, the conntrack map's capacity and the hash function's collision characteristics become the dominant performance factors. DSR modes, which eliminate connection tracking entirely, exhibit superior scaling behavior under such conditions.
 
 ---
-
-## 11. References
-
-### Source Tutorials
-
-- Building an eBPF/XDP NAT-Based Layer 4 Load Balancer from Scratch — [labs.iximiuz.com](https://labs.iximiuz.com/tutorials/xdp-load-balancer-700a1d74)
-- Building an eBPF/XDP L2 Direct Server Return Load Balancer from Scratch — [labs.iximiuz.com](https://labs.iximiuz.com/tutorials/xdp-dsr-layer2-lb-92b02f3e)
-- Building an eBPF/XDP IP-in-IP Direct Server Return Load Balancer from Scratch — [labs.iximiuz.com](https://labs.iximiuz.com/tutorials/xdp-dsr-load-balancer-b701a95a)
-- Building an eBPF-based Firewall with LPM Trie–Based IP Range Matching — [labs.iximiuz.com](https://labs.iximiuz.com/tutorials/ebpf-firewall-ed03d648)
-- Network Traffic Rate Limiting with eBPF/XDP — [labs.iximiuz.com](https://labs.iximiuz.com/tutorials/ebpf-ratelimiting-dbc12915)
-
-### Production Reference Systems
-
-- Meta Katran — XDP-based Layer 4 load balancer ([github.com/facebookincubator/katran](https://github.com/facebookincubator/katran))
-- Cilium — eBPF-based networking, security, and load balancing ([cilium.io](https://cilium.io/use-cases/load-balancer/))
-- Cloudflare Magic Firewall and Unimog — XDP-based DDoS mitigation and global load balancing
-
-### Technical Documentation
-
-- eBPF Documentation — [docs.ebpf.io](https://docs.ebpf.io/)
-- XDP Tutorial — [github.com/xdp-project/xdp-tutorial](https://github.com/xdp-project/xdp-tutorial)
-- cilium/ebpf Go Library — [github.com/cilium/ebpf](https://github.com/cilium/ebpf)
