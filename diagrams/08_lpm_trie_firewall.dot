@@ -1,0 +1,42 @@
+// LPM Trie Structure for Firewall IP Range Matching
+// Generate: dot -Tpng 08_lpm_trie_firewall.dot -o 08_lpm_trie_firewall.png
+
+digraph lpm_trie {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, margin="0.15,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="BPF_MAP_TYPE_LPM_TRIE — Longest Prefix Match for IP Range Firewall";
+    labelloc=t;
+    fontsize=15;
+
+    // Incoming packet
+    packet [label="Incoming Packet\nsrc_ip: 192.168.178.42", shape=oval, fillcolor="#aed6f1"];
+
+    // Build lookup key
+    key_build [label="Build LPM Key\nprefixlen = 32\ndata = ntohl(src_ip)", shape=box, fillcolor="#fdebd0"];
+
+    // Trie root
+    root [label="LPM Trie Root", shape=circle, fillcolor="#f9e79f"];
+
+    // Trie branches
+    n_10     [label="10.0.0.0/8\n(allowed)", shape=box, fillcolor="#d5f5e3"];
+    n_172    [label="172.16.0.0/16\n(allowed)", shape=box, fillcolor="#d5f5e3"];
+    n_192    [label="192.168.0.0/16\n(blocked)", shape=box, fillcolor="#f5b7b1"];
+    n_192_178 [label="192.168.178.0/24\n(blocked — longest match!)", shape=box, fillcolor="#e74c3c", fontcolor=white];
+
+    // Decision
+    decision [label="Match Found?\n192.168.178.0/24", shape=diamond, fillcolor="#f9e79f"];
+    drop     [label="XDP_DROP\n(Packet blocked)", shape=oval, fillcolor="#e74c3c", fontcolor=white];
+    pass     [label="XDP_PASS\n(Continue to LB)", shape=oval, fillcolor="#82e0aa"];
+
+    packet -> key_build [label="extract src IP"];
+    key_build -> root [label="bpf_map_lookup_elem()"];
+    root -> n_10 [label="0"];
+    root -> n_172 [label="1"];
+    root -> n_192 [label="1"];
+    n_192 -> n_192_178 [label="longest prefix\nwalk deeper", color="#e74c3c", penwidth=2];
+    n_192_178 -> decision [color="#e74c3c", penwidth=2];
+    decision -> drop [label="blocked == 1", color="#e74c3c", penwidth=2];
+    decision -> pass [label="not found", color="#27ae60", style=dashed];
+}

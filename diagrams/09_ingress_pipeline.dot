@@ -1,0 +1,58 @@
+// Complete XDP Ingress Processing Pipeline
+// Generate: dot -Tpng 09_ingress_pipeline.dot -o 09_ingress_pipeline.png
+
+digraph pipeline {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.12"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="Complete XDP Ingress Processing Pipeline";
+    labelloc=t;
+    fontsize=16;
+    nodesep=0.4;
+
+    incoming [label="Incoming Packet\n(from NIC driver)", shape=oval, fillcolor="#aed6f1"];
+
+    parse [label="① Parse Headers\nEthernet → IP → TCP/UDP\nValidate bounds (eBPF verifier safety)\nExtract 5-tuple", fillcolor="#d6eaf8"];
+
+    firewall [label="② Firewall Check\nLPM Trie lookup on src IP\nMatch against blocked CIDR ranges", fillcolor="#fadbd8"];
+    fw_drop [label="XDP_DROP\n(Blacklisted IP)", shape=oval, fillcolor="#e74c3c", fontcolor=white];
+
+    ratelimit [label="③ Rate Limit Check\nLRU Hash lookup on client IP\nCompare timestamp vs window", fillcolor="#fef9e7"];
+    rl_drop [label="XDP_DROP\n(Rate exceeded)", shape=oval, fillcolor="#e74c3c", fontcolor=white];
+
+    conntrack [label="④ Connection Tracking\nHash map lookup on 5-tuple\nExisting connection? → Route response\nNew connection? → Continue to LB", fillcolor="#e8daef"];
+
+    lb_hash [label="⑤ Load Balancing\nFNV-1a hash of 5-tuple\nModulo NUM_BACKENDS\nLookup backend from array map", fillcolor="#d5f5e3"];
+
+    fib [label="⑥ FIB Lookup\nbpf_fib_lookup()\nResolve next-hop MAC addresses\nQuery kernel routing + ARP tables", fillcolor="#d5f5e3"];
+
+    rewrite [label="⑦ Packet Rewriting", fillcolor="#82e0aa", shape=record];
+
+    nat_mode [label="NAT Mode\nRewrite src + dst IP\nRewrite src + dst MAC", fillcolor="#abebc6"];
+    l2_mode  [label="L2 DSR Mode\nRewrite MAC only\nIP header preserved", fillcolor="#abebc6"];
+    ipip_mode [label="IPIP DSR Mode\nPrepend outer IP header\nbpf_xdp_adjust_head()", fillcolor="#abebc6"];
+
+    checksum [label="⑧ Checksum Recalculation\nIncremental L3 (IP) checksum\nIncremental L4 (TCP) checksum\n(or full recompute for IPIP)", fillcolor="#d6eaf8"];
+
+    transmit [label="⑨ XDP_TX / XDP_REDIRECT\nTransmit packet", shape=oval, fillcolor="#27ae60", fontcolor=white];
+
+    // Flow
+    incoming -> parse;
+    parse -> firewall;
+    firewall -> fw_drop [label="blocked", color="#e74c3c", style=bold];
+    firewall -> ratelimit [label="allowed", color="#27ae60"];
+    ratelimit -> rl_drop [label="exceeded", color="#e74c3c", style=bold];
+    ratelimit -> conntrack [label="within limit", color="#27ae60"];
+    conntrack -> lb_hash [label="new connection", color="#27ae60"];
+    conntrack -> fib [label="existing (response path)", color="#8e44ad", style=dashed];
+    lb_hash -> fib;
+    fib -> rewrite;
+    rewrite -> nat_mode [style=dashed];
+    rewrite -> l2_mode [style=dashed];
+    rewrite -> ipip_mode [style=dashed];
+    nat_mode -> checksum;
+    l2_mode -> checksum;
+    ipip_mode -> checksum;
+    checksum -> transmit;
+}

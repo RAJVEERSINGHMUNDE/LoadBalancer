@@ -1,0 +1,44 @@
+// Per-Client Rate Limiting with eBPF LRU Hash Map
+// Generate: dot -Tpng 10_rate_limiting.dot -o 10_rate_limiting.png
+
+digraph rate_limiting {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="Per-Client Rate Limiting with eBPF LRU Hash Map";
+    labelloc=t;
+    fontsize=15;
+
+    packet [label="Incoming Packet\nextract client IP", shape=oval, fillcolor="#aed6f1"];
+
+    get_time [label="Get Current Time\nbpf_ktime_get_ns()\n(nanoseconds since boot)", fillcolor="#d6eaf8"];
+
+    lookup [label="Lookup Client in LRU Hash\nbpf_map_lookup_elem(\n  &last_time, &client_ip)", fillcolor="#fdebd0"];
+
+    found [label="Entry Exists?", shape=diamond, fillcolor="#f9e79f"];
+
+    check_window [label="Time Check\nnow − last_allowed\n< RATE_WINDOW?", shape=diamond, fillcolor="#f9e79f"];
+
+    drop [label="XDP_DROP\nRate limit exceeded", shape=oval, fillcolor="#e74c3c", fontcolor=white];
+
+    update [label="Update Timestamp\n*last_allowed = now", fillcolor="#d5f5e3"];
+
+    first_seen [label="First Packet from Client\nbpf_map_update_elem(\n  &last_time, &client_ip,\n  &now, BPF_ANY)", fillcolor="#d5f5e3"];
+
+    allow [label="Allow Packet\nContinue to LB pipeline", shape=oval, fillcolor="#82e0aa"];
+
+    lru_note [label="LRU Eviction\nWhen map is full, oldest\nentries auto-evicted\n(prevents memory exhaustion)", shape=note, fillcolor="#fef9e7", fontsize=10];
+
+    packet -> get_time;
+    get_time -> lookup;
+    lookup -> found;
+    found -> check_window [label="yes"];
+    found -> first_seen [label="no (new client)"];
+    check_window -> drop [label="yes (too soon)", color="#e74c3c", penwidth=2];
+    check_window -> update [label="no (allowed)"];
+    update -> allow;
+    first_seen -> allow;
+
+    lookup -> lru_note [style=invis];
+}

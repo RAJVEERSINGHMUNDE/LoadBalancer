@@ -1,0 +1,37 @@
+// Connection Tracking and 5-Tuple Hashing
+// Generate: dot -Tpng 03_conntrack_and_hashing.dot -o 03_conntrack_and_hashing.png
+
+digraph conntrack {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=record, margin="0.15,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="Connection Tracking & FNV-1a Hashing for Backend Selection";
+    labelloc=t;
+    fontsize=15;
+
+    // Incoming packet
+    packet [label="{Incoming Packet|{src_ip: 10.0.0.20 | dst_ip: 192.168.178.10 | src_port: 54321 | dst_port: 8000 | proto: TCP}}", fillcolor="#aed6f1"];
+
+    // Hash function
+    hash [label="FNV-1a Hash\nhash = 2166136261\nhash = (hash ^ field) × 16777619\nfor each tuple field", shape=oval, fillcolor="#f9e79f"];
+
+    // Modulo
+    modulo [label="hash % NUM_BACKENDS", shape=diamond, fillcolor="#fdebd0"];
+
+    // Backends array
+    backends [label="{Backends eBPF Map (BPF_MAP_TYPE_ARRAY)|{key=0 → 192.168.178.11 | key=1 → 192.168.178.12}}", fillcolor="#d5f5e3"];
+
+    // Conntrack map
+    conntrack [label="{Conntrack eBPF Map (BPF_MAP_TYPE_HASH)|{5-tuple key → client endpoint value}|{Store: LB↔Backend tuple → Client IP | Lookup: on backend response}}", fillcolor="#e8daef"];
+
+    // Selected backend
+    selected [label="Selected Backend\n192.168.178.11", shape=oval, fillcolor="#82e0aa"];
+
+    packet -> hash [label="extract 5-tuple"];
+    hash -> modulo [label="hash value"];
+    modulo -> backends [label="index"];
+    backends -> selected [label="lookup"];
+    packet -> conntrack [label="store mapping\nfor return path", style=dashed, color="#8e44ad"];
+    conntrack -> selected [label="or lookup existing\nconnection", style=dashed, color="#8e44ad"];
+}

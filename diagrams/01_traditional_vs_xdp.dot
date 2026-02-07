@@ -1,0 +1,55 @@
+// Traditional User-Space LB vs XDP Kernel-Bypass Path
+// Generate: dot -Tpng 01_traditional_vs_xdp.dot -o 01_traditional_vs_xdp.png
+
+digraph traditional_vs_xdp {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="Traditional User-Space LB vs. XDP Kernel-Bypass Path";
+    labelloc=t;
+    fontsize=16;
+    compound=true;
+
+    subgraph cluster_traditional {
+        label="Traditional Path (HAProxy / NGINX)";
+        labeljust=l;
+        style=filled;
+        color="#fce4e4";
+        fillcolor="#fce4e4";
+
+        t_nic       [label="NIC\n(Network Interface)", fillcolor="#f8d7da"];
+        t_driver    [label="Network Driver", fillcolor="#f8d7da"];
+        t_stack     [label="Kernel Network Stack\n(sk_buff, netfilter, routing)", fillcolor="#f8d7da"];
+        t_socket    [label="Socket / Syscall\n(context switch)", fillcolor="#f8d7da"];
+        t_userspace [label="User-Space Load Balancer\n(HAProxy, NGINX)", fillcolor="#e2a4a4"];
+        t_socket2   [label="Socket / Syscall\n(context switch)", fillcolor="#f8d7da"];
+        t_stack2    [label="Kernel Network Stack\n(routing, netfilter)", fillcolor="#f8d7da"];
+        t_driver2   [label="Network Driver", fillcolor="#f8d7da"];
+        t_nic2      [label="NIC (Transmit)", fillcolor="#f8d7da"];
+
+        t_nic -> t_driver -> t_stack -> t_socket -> t_userspace [color="#c0392b"];
+        t_userspace -> t_socket2 -> t_stack2 -> t_driver2 -> t_nic2 [color="#c0392b"];
+    }
+
+    subgraph cluster_xdp {
+        label="XDP Path (eBPF Kernel-Bypass)";
+        labeljust=l;
+        style=filled;
+        color="#d5f5e3";
+        fillcolor="#d5f5e3";
+
+        x_nic       [label="NIC\n(Network Interface)", fillcolor="#d4efdf"];
+        x_driver    [label="Network Driver\n(XDP hook — earliest point)", fillcolor="#d4efdf"];
+        x_ebpf      [label="eBPF/XDP Program\n(load balance + firewall + rate limit)", fillcolor="#82e0aa"];
+        x_decision  [label="XDP Action", fillcolor="#82e0aa", shape=diamond];
+        x_tx        [label="XDP_TX / XDP_REDIRECT\n(Transmit immediately)", fillcolor="#abebc6"];
+        x_drop      [label="XDP_DROP\n(Discard packet)", fillcolor="#f9e79f"];
+        x_pass      [label="XDP_PASS\n(Hand to kernel stack)", fillcolor="#aed6f1"];
+
+        x_nic -> x_driver -> x_ebpf -> x_decision [color="#27ae60"];
+        x_decision -> x_tx   [label="forward", color="#27ae60"];
+        x_decision -> x_drop [label="block", color="#e67e22"];
+        x_decision -> x_pass [label="passthrough", color="#3498db"];
+    }
+}

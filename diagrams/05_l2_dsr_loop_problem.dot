@@ -1,0 +1,43 @@
+// L2 DSR Cross-Network Routing Loop Problem
+// Generate: dot -Tpng 05_l2_dsr_loop_problem.dot -o 05_l2_dsr_loop_problem.png
+
+digraph l2_dsr_loop {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=10];
+    label="L2 DSR Failure: Cross-Network Routing Loop";
+    labelloc=t;
+    fontsize=15;
+
+    subgraph cluster_net_a {
+        label="Network A — 192.168.178.0/24";
+        style=filled;
+        fillcolor="#d5f5e3";
+        color="#82e0aa";
+
+        lb [label="Load Balancer\n192.168.178.10\nVIP: .15 (advertised)", fillcolor="#82e0aa", shape=doubleoctagon];
+    }
+
+    gateway [label="Gateway / Router\n192.168.178.2\n172.16.0.2", fillcolor="#f9e79f"];
+
+    subgraph cluster_net_b {
+        label="Network B — 172.16.0.0/24";
+        style=filled;
+        fillcolor="#e8daef";
+        color="#d7bde2";
+
+        be1 [label="Backend-01\n172.16.0.10\nVIP: .15 on lo (hidden)", fillcolor="#d7bde2", shape=oval];
+    }
+
+    // The loop
+    lb -> gateway [label="① LB rewrites dst MAC\nto gateway (exit L2)", color="#e74c3c", penwidth=2.5, style=bold];
+    gateway -> lb [label="② Gateway only knows VIP\nat LB → routes back!", color="#e74c3c", penwidth=2.5, style=bold];
+
+    // What should happen
+    gateway -> be1 [label="✗ Never reaches backend\n(VIP not advertised here)", color="#95a5a6", style=dashed, penwidth=1.5];
+
+    // Loop annotation
+    loop_label [label="∞ INFINITE LOOP\nPacket bounces between\nLB and Gateway forever", shape=oval, fillcolor="#f5b7b1", fontsize=12, fontcolor="#c0392b"];
+    gateway -> loop_label [style=invis];
+}

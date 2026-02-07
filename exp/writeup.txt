@@ -1,0 +1,643 @@
+================================================================================
+              eBPF/XDP Layer 4 Load Balancer with Integrated Security
+                    A High-Performance Kernel-Bypass Solution
+================================================================================
+
+                              PROJECT OVERVIEW
+================================================================================
+
+This project implements a production-grade Layer 4 (L4) load balancer leveraging
+eBPF (extended Berkeley Packet Filter) and XDP (eXpress Data Path) technology.
+The solution combines multiple advanced networking concepts to deliver:
+
+  • Ultra-low latency packet processing at the kernel bypass level
+  • Multiple load balancing modes (NAT, L2 DSR, and IP-in-IP DSR)
+  • Integrated firewall with LPM Trie-based IP range matching
+  • Per-client rate limiting for DDoS protection and fair usage enforcement
+
+By processing packets before they reach the kernel's networking stack, this
+solution achieves performance characteristics that traditional user-space load
+balancers (NGINX, HAProxy) simply cannot match.
+
+
+================================================================================
+                         1. ARCHITECTURAL FOUNDATION
+================================================================================
+
+1.1 Why eBPF/XDP for Load Balancing?
+------------------------------------
+
+Traditional load balancers operate in user space, requiring every incoming packet
+to traverse the entire kernel networking stack, cross the user-kernel boundary,
+and return through the same path for forwarding. Each of these operations adds
+latency:
+
+    [NIC] → [Driver] → [Kernel Network Stack] → [Socket] → [User Space LB]
+                                                                ↓
+    [NIC] ← [Driver] ← [Kernel Network Stack] ← [Socket] ← [Decision Made]
+
+With XDP, packets are intercepted at the earliest possible point—immediately
+after the network driver receives them—and processed entirely in kernel space:
+
+    [NIC] → [Driver] → [XDP/eBPF Program] → [Forward/Drop/Pass Decision]
+
+This architecture eliminates:
+  • User-kernel context switches
+  • Memory buffer copying between kernel and user space
+  • Full kernel network stack traversal
+  • Socket overhead
+
+Production systems like Meta's Katran and Cloudflare's Unimog demonstrate that
+XDP-based load balancers can handle millions of packets per second with
+sub-microsecond latency.
+
+
+1.2 Core XDP Actions
+--------------------
+
+The XDP framework provides five return codes that determine packet fate:
+
+  XDP_PASS     - Hand packet to kernel network stack for normal processing
+  XDP_DROP     - Silently discard the packet
+  XDP_ABORTED  - Drop packet and trigger a tracepoint for debugging
+  XDP_TX       - Transmit packet back out the same interface
+  XDP_REDIRECT - Forward packet to a different interface or CPU
+
+
+1.3 eBPF Maps for State Management
+----------------------------------
+
+eBPF maps provide persistent kernel-space storage shared between XDP programs
+and user-space control planes. This project utilizes several map types:
+
+  BPF_MAP_TYPE_ARRAY       - Fixed-size array for backend server endpoints
+  BPF_MAP_TYPE_HASH        - Connection tracking for NAT state
+  BPF_MAP_TYPE_LRU_HASH    - Rate limiting with automatic eviction of old entries
+  BPF_MAP_TYPE_LPM_TRIE    - Longest Prefix Match for IP range-based firewall rules
+
+
+================================================================================
+                     2. NAT-BASED LOAD BALANCING MODE
+================================================================================
+
+2.1 Concept Overview
+--------------------
+
+Network Address Translation (NAT) based load balancing rewrites packet headers
+as traffic flows through the load balancer. This mode requires the load balancer
+to handle both ingress (client→backend) and egress (backend→client) traffic.
+
+    Client Request:
+    [Client IP:Port] ────→ [LB VIP:Port] ────→ [Backend IP:Port]
+                           (DNAT applied)
+
+    Backend Response:
+    [Backend IP:Port] ────→ [LB VIP:Port] ────→ [Client IP:Port]
+                           (SNAT applied)
+
+
+2.2 Connection Tracking with eBPF Maps
+--------------------------------------
+
+To properly route responses back to clients, the load balancer maintains a
+connection tracking table (conntrack) as an eBPF hash map. The 5-tuple uniquely
+identifies each connection:
+
+    struct five_tuple_t {
+        __u32 src_ip;      // Source IP address
+        __u32 dst_ip;      // Destination IP address
+        __u16 src_port;    // Source port
+        __u16 dst_port;    // Destination port
+        __u8  protocol;    // Protocol (TCP=6, UDP=17)
+    };
+
+When a client request arrives:
+  1. Hash the 5-tuple to select a backend server
+  2. Store the client→backend mapping in conntrack
+  3. Rewrite destination IP/MAC to backend
+  4. Forward packet
+
+When a backend response arrives:
+  1. Look up the original client from conntrack
+  2. Rewrite destination IP/MAC to client
+  3. Rewrite source IP to load balancer VIP
+  4. Forward packet
+
+
+2.3 Load Balancing Algorithm: FNV-1a Hashing
+--------------------------------------------
+
+For session affinity (same client always reaches same backend), we hash the
+5-tuple using the FNV-1a algorithm:
+
+    static __always_inline __u32 xdp_hash_tuple(struct five_tuple_t *tuple) {
+        __u32 hash = 2166136261U;  // FNV offset basis
+        hash = (hash ^ tuple->src_ip) * 16777619U;
+        hash = (hash ^ tuple->dst_ip) * 16777619U;
+        hash = (hash ^ tuple->src_port) * 16777619U;
+        hash = (hash ^ tuple->dst_port) * 16777619U;
+        hash = (hash ^ tuple->protocol) * 16777619U;
+        return hash;
+    }
+
+The backend is selected via modulo: `backend_index = hash % NUM_BACKENDS`
+
+This ensures deterministic routing—the same client connection always maps to
+the same backend, enabling stateful applications and session persistence.
+
+
+2.4 FIB Lookup for MAC Address Resolution
+-----------------------------------------
+
+Rather than hardcoding MAC addresses, we query the kernel's Forwarding
+Information Base (FIB) and ARP tables using bpf_fib_lookup():
+
+    struct bpf_fib_lookup fib = {};
+    fib.family = AF_INET;
+    fib.ipv4_src = src_ip;
+    fib.ipv4_dst = dst_ip;
+    fib.ifindex = ctx->ingress_ifindex;
+    
+    int rc = bpf_fib_lookup(ctx, &fib, sizeof(fib), 0);
+    
+    if (rc == BPF_FIB_LKUP_RET_SUCCESS) {
+        // fib.smac contains source MAC
+        // fib.dmac contains destination MAC
+    }
+
+This approach automatically handles routing decisions, gateway resolution,
+and MAC address lookup without hardcoded configuration.
+
+
+2.5 Advantages and Trade-offs
+-----------------------------
+
+Advantages:
+  ✓ Works across different networks/subnets
+  ✓ Gateway routing handled automatically
+  ✓ Enables bidirectional traffic inspection and policy enforcement
+  ✓ Client IP visible to load balancer for logging/security
+
+Trade-offs:
+  ✗ Load balancer processes both request and response (resource intensive)
+  ✗ Can become a bottleneck for high-bandwidth responses
+  ✗ Backend sees load balancer IP as client (not original client IP)
+
+
+================================================================================
+                  3. LAYER 2 DIRECT SERVER RETURN (L2 DSR)
+================================================================================
+
+3.1 DSR Concept
+---------------
+
+Direct Server Return eliminates the load balancer from the response path.
+The backend responds directly to the client, bypassing the load balancer:
+
+    Request:   [Client] ────→ [Load Balancer] ────→ [Backend]
+    Response:  [Client] ←────────────────────────── [Backend]
+
+This dramatically reduces load balancer resource consumption, especially for
+asymmetric traffic patterns where responses far exceed request sizes (e.g.,
+video streaming, large API responses, AI model outputs).
+
+
+3.2 Virtual IP (VIP) Architecture
+---------------------------------
+
+For DSR to work, both the load balancer and backends must share the same
+Virtual IP (VIP). The client always sees responses from the VIP it contacted.
+
+Load Balancer Configuration:
+    sudo ip addr add 192.168.178.15/32 dev eth0
+
+Backend Configuration (on loopback to hide from ARP):
+    sudo ip addr add 192.168.178.15/32 dev lo
+    
+    # Prevent backend from advertising VIP via ARP
+    sudo sysctl -w net.ipv4.conf.eth0.arp_ignore=1
+    sudo sysctl -w net.ipv4.conf.eth0.arp_announce=2
+
+This configuration ensures:
+  • Only the load balancer advertises the VIP on the network
+  • Backends can send responses with VIP as source (valid for TCP/IP stack)
+  • Clients receive responses from the same IP they contacted
+
+
+3.3 L2 DSR Packet Rewriting
+---------------------------
+
+In Layer 2 DSR, we ONLY rewrite MAC addresses—the IP header remains unchanged:
+
+    // Perform FIB lookup to get backend's MAC address
+    struct bpf_fib_lookup fib = {};
+    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip, ...);
+
+    // Rewrite MAC addresses only—IP header untouched!
+    __builtin_memcpy(eth->h_source, fib.smac, ETH_ALEN);  // LB's MAC
+    __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);    // Backend's MAC
+
+Because the IP header is preserved:
+  • Backend sees original client IP (for logging, rate limiting, personalization)
+  • Backend responds directly to client IP
+  • No connection tracking needed on load balancer
+
+
+3.4 L2 DSR Limitations
+----------------------
+
+Layer 2 DSR requires all backends to share the same L2 network segment as the
+load balancer. If a backend is on a different subnet:
+  • The MAC rewrite points to the gateway
+  • The gateway sees VIP as destination
+  • Gateway routes back to load balancer (the only node advertising VIP)
+  • Result: Infinite routing loop
+
+This constraint makes L2 DSR unsuitable for cloud environments where nodes
+span multiple availability zones or virtual networks.
+
+
+================================================================================
+                 4. IP-IN-IP DIRECT SERVER RETURN (IPIP DSR)
+================================================================================
+
+4.1 Overcoming L2 DSR Limitations
+---------------------------------
+
+IP-in-IP encapsulation extends DSR to work across different networks by
+wrapping the original packet inside a new IP header:
+
+    Original Packet:
+    [Eth][IP: Client→VIP][TCP][Payload]
+
+    Encapsulated Packet:
+    [Eth][Outer IP: LB→Backend][Inner IP: Client→VIP][TCP][Payload]
+
+The outer IP header provides routable addresses for network traversal, while
+the inner header preserves the original client→VIP addressing.
+
+
+4.2 IPIP Encapsulation in XDP
+-----------------------------
+
+The XDP program must:
+  1. Expand the packet buffer to accommodate the new outer IP header
+  2. Construct the outer IP header with routable addresses
+  3. Preserve the original inner IP header intact
+
+    // Make room for outer IP header (20 bytes)
+    int adj = bpf_xdp_adjust_head(ctx, 0 - (int)sizeof(struct iphdr));
+
+    // Build outer IP header
+    outer->version = 4;
+    outer->ihl = 5;
+    outer->ttl = 64;
+    outer->protocol = IPPROTO_IPIP;  // Protocol 4: IP-in-IP
+    outer->saddr = lb_real_ip;       // Load balancer's routable IP
+    outer->daddr = backend_ip;       // Backend's routable IP
+    outer->check = recalc_ip_checksum(outer);
+
+
+4.3 Backend IPIP Decapsulation
+------------------------------
+
+Backends must be configured to decapsulate IPIP packets:
+
+    # Load the IPIP kernel module
+    sudo modprobe ipip
+    
+    # Create IPIP tunnel interface
+    sudo ip link add name ipip0 type ipip external
+    sudo ip link set up dev ipip0
+    sudo ip address add 127.0.0.42/32 dev ipip0
+
+When the backend receives the encapsulated packet:
+  1. Kernel recognizes IPPROTO_IPIP (protocol 4)
+  2. IPIP module strips outer header
+  3. Inner packet (Client→VIP) is processed normally
+  4. Backend responds directly to client (VIP configured on loopback)
+
+
+4.4 IPIP DSR Network Topology
+-----------------------------
+
+This mode supports complex multi-network deployments:
+
+    Network A (192.168.178.0/24):
+      └── Load Balancer: 192.168.178.10
+
+    Network B (172.16.0.0/24):
+      ├── Backend-01: 172.16.0.10
+      └── Backend-02: 172.16.0.11
+
+    Network C (10.0.0.0/16):
+      └── Client: 10.0.0.20
+
+    Gateway routing between all networks
+
+Packets are encapsulated at the load balancer, traverse the gateway with
+routable outer IP addresses, and are decapsulated at the backend.
+
+
+================================================================================
+                5. INTEGRATED FIREWALL WITH LPM TRIE
+================================================================================
+
+5.1 XDP-Based Packet Filtering
+------------------------------
+
+Unlike traditional netfilter/iptables, XDP firewalls process packets before
+the kernel network stack, achieving dramatically higher packet drop rates:
+
+    Processing Mode          | Packets/sec (Cloudflare benchmark)
+    -------------------------+------------------------------------
+    iptables (raw table)     | ~2 million pps
+    nftables (ingress)       | ~3 million pps
+    XDP (generic)            | ~4 million pps
+    XDP (native driver)      | ~10+ million pps
+
+This performance is critical for mitigating volumetric DDoS attacks.
+
+
+5.2 BPF_MAP_TYPE_LPM_TRIE for IP Range Matching
+-----------------------------------------------
+
+Rather than storing individual IP addresses, we use a Longest Prefix Match
+(LPM) Trie to efficiently match entire CIDR blocks:
+
+    struct {
+        __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+        __type(key, struct ipv4_lpm_key);
+        __type(value, __u32);
+        __uint(map_flags, BPF_F_NO_PREALLOC);
+        __uint(max_entries, 65535);
+    } blocked_ips SEC(".maps");
+
+    struct ipv4_lpm_key {
+        __u32 prefixlen;  // e.g., 24 for /24 subnet
+        __u32 data;       // IP address in network byte order
+    };
+
+A single map entry for 192.168.0.0/16 matches all 65,536 addresses in that
+range. The trie structure provides O(prefix_length) lookup complexity.
+
+
+5.3 Firewall Integration
+------------------------
+
+Packet filtering is integrated directly into the load balancer pipeline:
+
+    SEC("xdp")
+    int xdp_load_balancer(struct xdp_md *ctx) {
+        // Parse Ethernet and IP headers
+        struct iphdr *ip = ...;
+        
+        // Check against blocked IP ranges
+        struct ipv4_lpm_key key = {
+            .prefixlen = 32,
+            .data = bpf_ntohl(ip->saddr),
+        };
+        
+        int *blocked = bpf_map_lookup_elem(&blocked_ips, &key);
+        if (blocked && *blocked) {
+            return XDP_DROP;  // Silently drop malicious traffic
+        }
+        
+        // Continue with load balancing logic...
+    }
+
+
+================================================================================
+                    6. RATE LIMITING IMPLEMENTATION
+================================================================================
+
+6.1 Per-Client Rate Limiting Architecture
+-----------------------------------------
+
+Rate limiting prevents abuse while allowing legitimate traffic:
+
+    struct {
+        __uint(type, BPF_MAP_TYPE_LRU_HASH);
+        __uint(max_entries, 65536);
+        __type(key, __u32);           // Client IP
+        __type(value, __u64);         // Last allowed timestamp (ns)
+    } rate_limit SEC(".maps");
+
+The LRU (Least Recently Used) hash automatically evicts stale entries when
+the map reaches capacity, preventing memory exhaustion attacks.
+
+
+6.2 Token Bucket / Fixed Window Algorithm
+-----------------------------------------
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 *last_allowed = bpf_map_lookup_elem(&rate_limit, &client_ip);
+    
+    if (last_allowed) {
+        if (now - *last_allowed < RATE_LIMIT_WINDOW_NS) {
+            return XDP_DROP;  // Rate limit exceeded
+        }
+        *last_allowed = now;  // Update timestamp
+    } else {
+        // First packet from this client
+        bpf_map_update_elem(&rate_limit, &client_ip, &now, BPF_ANY);
+    }
+
+
+6.3 TCP Handshake Considerations
+--------------------------------
+
+Rate limiting must be carefully applied to avoid breaking TCP connections:
+
+  • New connections: SYN packets should be rate-limited to prevent SYN floods
+  • Established connections: DATA packets typically exempted to avoid breaking
+    legitimate sessions
+  • Exceeded clients: Once rate-limited, even SYN packets should be dropped
+    to prevent connection table exhaustion
+
+For maximum simplicity, rate limiting is often applied to stateless protocols
+(UDP, ICMP) or at the connection establishment phase only.
+
+
+================================================================================
+               7. COMPLETE DATA FLOW ARCHITECTURE
+================================================================================
+
+7.1 Ingress Pipeline
+--------------------
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                        INCOMING PACKET                              │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  1. PARSE ETHERNET/IP/TCP HEADERS                                   │
+    │     - Validate packet bounds for eBPF verifier                      │
+    │     - Extract 5-tuple (src_ip, dst_ip, src_port, dst_port, proto)   │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  2. FIREWALL CHECK (LPM Trie Lookup)                                │
+    │     - Match source IP against blocked CIDR ranges                   │
+    │     - XDP_DROP if blacklisted                                       │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  3. RATE LIMIT CHECK (LRU Hash Lookup)                              │
+    │     - Compare current time vs last allowed timestamp                │
+    │     - XDP_DROP if rate exceeded                                     │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  4. CONNECTION TRACKING (Hash Lookup)                               │
+    │     - Check if packet belongs to existing connection                │
+    │     - Existing: Route response back to original client              │
+    │     - New: Select backend via hash, create conntrack entry          │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  5. LOAD BALANCING DECISION                                         │
+    │     - Hash 5-tuple → backend index                                  │
+    │     - Lookup backend from backends array                            │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  6. FIB LOOKUP (bpf_fib_lookup)                                     │
+    │     - Resolve next-hop MAC addresses                                │
+    │     - Determine egress interface                                    │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  7. PACKET REWRITING                                                │
+    │     NAT Mode: Rewrite IP + MAC headers                              │
+    │     L2 DSR:   Rewrite MAC headers only                              │
+    │     IPIP DSR: Encapsulate with outer IP header                      │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  8. CHECKSUM RECALCULATION                                          │
+    │     - Incremental L3 (IP) checksum update                           │
+    │     - Incremental L4 (TCP/UDP) checksum update                      │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  9. TRANSMIT (XDP_TX or XDP_REDIRECT)                               │
+    └─────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                      8. DEPLOYMENT CONSIDERATIONS
+================================================================================
+
+8.1 System Requirements
+-----------------------
+
+  • Linux kernel 4.8+ (XDP support)
+  • Kernel 5.x+ recommended for full feature set
+  • Network driver with native XDP support for optimal performance
+  • libbpf, clang/llvm for compilation
+  • Go runtime for user-space control plane (cilium/ebpf library)
+
+
+8.2 Required System Configuration
+---------------------------------
+
+    # Enable IP forwarding
+    sudo sysctl -w net.ipv4.ip_forward=1
+    
+    # Populate ARP cache for backends (required for bpf_fib_lookup)
+    sudo ping -c1 <backend-1-ip>
+    sudo ping -c1 <backend-2-ip>
+    
+    # For IPIP DSR mode on backends:
+    sudo modprobe ipip
+    sudo ip link add name ipip0 type ipip external
+    sudo ip link set up dev ipip0
+
+
+8.3 Production Considerations
+-----------------------------
+
+  • Health Checking: Implement backend health probes and update backends map
+  • Graceful Degradation: Handle bpf_fib_lookup failures gracefully
+  • Monitoring: Export eBPF map statistics via Prometheus/metrics
+  • Connection Draining: Implement proper connection tracking cleanup
+  • Hot Reloading: Support atomic eBPF program updates without traffic loss
+
+
+================================================================================
+                          9. PERFORMANCE ANALYSIS
+================================================================================
+
+9.1 Latency Comparison
+----------------------
+
+    Component                        | Latency Added
+    ---------------------------------+----------------
+    XDP (driver mode)                | ~200-500 ns
+    XDP (generic mode)               | ~1-2 μs
+    Kernel network stack             | ~5-20 μs
+    User-space context switch        | ~10-50 μs
+    HAProxy/NGINX user-space LB      | ~50-200 μs
+
+XDP provides 100-1000x latency reduction compared to user-space solutions.
+
+
+9.2 Throughput Characteristics
+------------------------------
+
+  • Line-rate performance: Modern NICs with XDP can achieve 10-100 Gbps
+  • Packet rate: 10-20+ million packets per second per core
+  • Connection rate: Limited by conntrack map operations (~1-5M new/sec)
+
+
+================================================================================
+                             10. REFERENCES
+================================================================================
+
+Tutorials and Labs:
+  • Building an eBPF/XDP NAT-Based Layer 4 Load Balancer from Scratch
+    https://labs.iximiuz.com/tutorials/xdp-load-balancer-700a1d74
+    
+  • Building an eBPF/XDP L2 Direct Server Return Load Balancer from Scratch
+    https://labs.iximiuz.com/tutorials/xdp-dsr-layer2-lb-92b02f3e
+    
+  • Building an eBPF/XDP IP-in-IP Direct Server Return Load Balancer from Scratch
+    https://labs.iximiuz.com/tutorials/xdp-dsr-load-balancer-b701a95a
+    
+  • Building an eBPF-based Firewall with LPM Trie-Based IP Range Matching
+    https://labs.iximiuz.com/tutorials/ebpf-firewall-ed03d648
+    
+  • Network Traffic Rate Limiting with eBPF/XDP
+    https://labs.iximiuz.com/tutorials/ebpf-ratelimiting-dbc12915
+
+Production Systems:
+  • Meta Katran: https://github.com/facebookincubator/katran
+  • Cilium Load Balancer: https://cilium.io/use-cases/load-balancer/
+  • Cloudflare Magic Firewall and Unimog
+
+Documentation:
+  • eBPF Documentation: https://docs.ebpf.io/
+  • XDP Tutorial: https://github.com/xdp-project/xdp-tutorial
+  • cilium/ebpf Go library: https://github.com/cilium/ebpf
+
+
+================================================================================
+                               CONCLUSION
+================================================================================
+
+This project demonstrates how eBPF/XDP technology enables building a 
+high-performance Layer 4 load balancer that combines:
+
+  ✓ Multiple load balancing modes for different deployment scenarios
+  ✓ Kernel-bypass packet processing for minimal latency
+  ✓ Integrated security with firewall and rate limiting
+  ✓ Session affinity through consistent hashing
+  ✓ Direct Server Return for efficient response handling
+  ✓ Cross-network support via IPIP encapsulation
+
+The modular architecture allows each component to be enabled or disabled
+based on requirements, providing flexibility for various deployment scenarios
+from single-network setups to complex multi-datacenter environments.
+
+================================================================================

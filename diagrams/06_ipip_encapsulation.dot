@@ -1,0 +1,45 @@
+// IP-in-IP Packet Encapsulation Structure
+// Generate: dot -Tpng 06_ipip_encapsulation.dot -o 06_ipip_encapsulation.png
+
+digraph ipip_packet {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=record, margin="0.15,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="IP-in-IP (IPIP) Packet Encapsulation";
+    labelloc=t;
+    fontsize=15;
+
+    // Original packet
+    subgraph cluster_original {
+        label="Original Packet (before LB)";
+        style=filled;
+        fillcolor="#eaf2f8";
+        color="#aed6f1";
+
+        orig [label="{Ethernet Header|{src MAC: Gateway | dst MAC: LB}}|{IP Header|{src: Client (10.0.0.20) | dst: VIP (192.168.178.15) | proto: TCP}}|{TCP Header|{src_port: 54321 | dst_port: 8000}}|{Payload}", fillcolor="#aed6f1"];
+    }
+
+    // Encapsulated packet
+    subgraph cluster_encapsulated {
+        label="Encapsulated Packet (after LB — IPIP DSR)";
+        style=filled;
+        fillcolor="#d5f5e3";
+        color="#82e0aa";
+
+        encap [label="{Ethernet Header (rewritten)|{src MAC: LB MAC | dst MAC: Gateway/Next-hop MAC}}|{OUTER IP Header (new)|{src: LB Real IP (192.168.178.10) | dst: Backend IP (172.16.0.10) | proto: IPPROTO_IPIP (4) | TTL: 64}}|{INNER IP Header (original, preserved)|{src: Client (10.0.0.20) | dst: VIP (192.168.178.15) | proto: TCP}}|{TCP Header (unchanged)|{src_port: 54321 | dst_port: 8000}}|{Payload (unchanged)}", fillcolor="#82e0aa"];
+    }
+
+    // Decapsulated at backend
+    subgraph cluster_decap {
+        label="Decapsulated at Backend (ipip0 tunnel)";
+        style=filled;
+        fillcolor="#fef9e7";
+        color="#f9e79f";
+
+        decap [label="{IP Header (inner — now primary)|{src: Client (10.0.0.20) | dst: VIP (192.168.178.15) | proto: TCP}}|{TCP Header|{src_port: 54321 | dst_port: 8000}}|{Payload}", fillcolor="#f9e79f"];
+    }
+
+    orig -> encap [label="bpf_xdp_adjust_head()\nPrepend outer IP header\nat Load Balancer", color="#27ae60", penwidth=2];
+    encap -> decap [label="IPIP kernel module\nStrips outer header\nat Backend", color="#e67e22", penwidth=2];
+}

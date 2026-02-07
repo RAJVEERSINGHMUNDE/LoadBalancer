@@ -1,0 +1,35 @@
+// Layer 2 DSR Load Balancing — Request via LB, Response Direct to Client
+// Generate: dot -Tpng 04_dsr_l2_flow.dot -o 04_dsr_l2_flow.png
+
+digraph dsr_l2 {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="Layer 2 DSR — Direct Server Return (Same L2 Network)";
+    labelloc=t;
+    fontsize=15;
+
+    // Shared VIP note
+    vip_note [label="Shared VIP: 192.168.178.15\nLB: on eth0 (advertised)\nBackends: on lo (hidden)", shape=note, fillcolor="#fef9e7", fontsize=10];
+
+    client   [label="Client\n10.0.0.20", fillcolor="#aed6f1", shape=oval];
+    gateway  [label="Gateway\n10.0.0.2 / 192.168.178.2", fillcolor="#f9e79f"];
+    lb       [label="Load Balancer\n192.168.178.10\nVIP: .15 on eth0\n(XDP: rewrite MACs only)", fillcolor="#82e0aa", shape=doubleoctagon];
+    be1      [label="Backend-01\n192.168.178.11\nVIP: .15 on lo", fillcolor="#d7bde2", shape=oval];
+    be2      [label="Backend-02\n192.168.178.12\nVIP: .15 on lo", fillcolor="#d7bde2", shape=oval];
+
+    // Request path — through LB
+    client -> gateway [label="dst: VIP (.15)\nsrc: Client IP", color="#2980b9", penwidth=2];
+    gateway -> lb     [label="ARP resolves VIP\nto LB's MAC", color="#2980b9", penwidth=2];
+    lb -> be1         [label="MAC rewrite only!\nIP header untouched\n(client IP preserved)", color="#27ae60", penwidth=2.5, style=bold];
+    lb -> be2         [label="(alternate)", color="#27ae60", penwidth=2, style=dashed];
+
+    // Response path — direct, bypassing LB
+    be1 -> gateway [label="Direct response!\nsrc: VIP (.15)\ndst: Client IP\n(bypasses LB)", color="#e74c3c", penwidth=2.5, style=bold];
+    be2 -> gateway [label="(alternate)", color="#e74c3c", penwidth=2, style=dashed];
+    gateway -> client [label="src: VIP (.15)\ndst: Client IP", color="#e74c3c", penwidth=2];
+
+    // Invisible edges for layout
+    vip_note -> lb [style=invis];
+}

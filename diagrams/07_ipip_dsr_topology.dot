@@ -1,0 +1,55 @@
+// IPIP DSR Multi-Network Topology
+// Generate: dot -Tpng 07_ipip_dsr_topology.dot -o 07_ipip_dsr_topology.png
+
+digraph ipip_topology {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="IPIP DSR — Multi-Network Topology with Cross-Subnet Routing";
+    labelloc=t;
+    fontsize=15;
+    nodesep=0.8;
+
+    subgraph cluster_net_client {
+        label="Client Network — 10.0.0.0/16";
+        style=filled;
+        fillcolor="#eaf2f8";
+        color="#aed6f1";
+
+        client [label="Client\n10.0.0.20", fillcolor="#aed6f1", shape=oval];
+    }
+
+    subgraph cluster_net_lb {
+        label="LB Network — 192.168.178.0/24";
+        style=filled;
+        fillcolor="#d5f5e3";
+        color="#82e0aa";
+
+        lb [label="Load Balancer\n192.168.178.10\nVIP: 192.168.178.15 (on eth0)", fillcolor="#82e0aa", shape=doubleoctagon];
+    }
+
+    gateway [label="Gateway / Router\n10.0.0.2\n192.168.178.2\n172.16.0.2", fillcolor="#f9e79f", shape=hexagon];
+
+    subgraph cluster_net_backend {
+        label="Backend Network — 172.16.0.0/24";
+        style=filled;
+        fillcolor="#e8daef";
+        color="#d7bde2";
+
+        be1 [label="Backend-01\n172.16.0.10\nVIP: .15 on lo\nipip0 tunnel active", fillcolor="#d7bde2", shape=oval];
+        be2 [label="Backend-02\n172.16.0.11\nVIP: .15 on lo\nipip0 tunnel active", fillcolor="#d7bde2", shape=oval];
+    }
+
+    // Request flow
+    client -> gateway [label="① Client → VIP", color="#2980b9", penwidth=2];
+    gateway -> lb [label="② Routed to LB\n(VIP advertised)", color="#2980b9", penwidth=2];
+    lb -> gateway [label="③ IPIP encapsulated\nouter dst: Backend IP\ninner: Client→VIP", color="#27ae60", penwidth=2.5, style=bold];
+    gateway -> be1 [label="④ Routed via outer IP\nto backend subnet", color="#27ae60", penwidth=2.5, style=bold];
+    gateway -> be2 [label="(alternate)", color="#27ae60", style=dashed, penwidth=1.5];
+
+    // Response flow — direct
+    be1 -> gateway [label="⑤ Direct response!\nsrc: VIP, dst: Client\n(bypasses LB entirely)", color="#e74c3c", penwidth=2.5, style=bold];
+    be2 -> gateway [label="(alternate)", color="#e74c3c", style=dashed, penwidth=1.5];
+    gateway -> client [label="⑥ Routed to client\nsrc: VIP", color="#e74c3c", penwidth=2];
+}

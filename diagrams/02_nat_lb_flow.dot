@@ -1,0 +1,43 @@
+// NAT-Based Load Balancing — Request and Response Flow
+// Generate: dot -Tpng 02_nat_lb_flow.dot -o 02_nat_lb_flow.png
+
+digraph nat_lb_flow {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style=filled, shape=box, margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    label="NAT-Based Load Balancing — Bidirectional Traffic Flow";
+    labelloc=t;
+    fontsize=15;
+
+    // Nodes
+    client   [label="Client\n10.0.0.20", fillcolor="#aed6f1", shape=oval];
+    gateway  [label="Gateway\n10.0.0.2 / 192.168.178.2", fillcolor="#f9e79f"];
+    lb       [label="Load Balancer\n192.168.178.10\n(XDP/eBPF)", fillcolor="#82e0aa", shape=doubleoctagon];
+    be1      [label="Backend-01\n192.168.178.11", fillcolor="#d7bde2", shape=oval];
+    be2      [label="Backend-02\n192.168.178.12", fillcolor="#d7bde2", shape=oval];
+
+    // Request path
+    client -> gateway [label="dst: LB IP\nsrc: Client IP", color="#2980b9", penwidth=2];
+    gateway -> lb     [label="dst: LB IP\nsrc: Client IP", color="#2980b9", penwidth=2];
+    lb -> be1         [label="DNAT: dst → Backend IP\nsrc: LB IP\n(hash selects backend)", color="#27ae60", penwidth=2, style=bold];
+    lb -> be2         [label="(alternate backend)", color="#27ae60", penwidth=2, style=dashed];
+
+    // Response path
+    be1 -> lb      [label="dst: LB IP\nsrc: Backend IP", color="#e74c3c", penwidth=2, style=bold];
+    be2 -> lb      [label="(alternate)", color="#e74c3c", penwidth=2, style=dashed];
+    lb -> gateway  [label="SNAT: src → LB IP\ndst: Client IP", color="#e74c3c", penwidth=2];
+    gateway -> client [label="dst: Client IP\nsrc: LB IP", color="#e74c3c", penwidth=2];
+
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        style=filled;
+        fillcolor="#f8f9fa";
+        color="#dee2e6";
+        fontsize=10;
+        l1 [label="Blue = Client Request", fillcolor="#aed6f1", shape=plaintext];
+        l2 [label="Red = Backend Response", fillcolor="#f5b7b1", shape=plaintext];
+        l1 -> l2 [style=invis];
+    }
+}
